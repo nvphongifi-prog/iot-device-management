@@ -83,6 +83,19 @@ Example:
 }
 ```
 
+Handshake:
+
+```json
+{
+    "action": "handshake",
+    "clientId": "client-123",
+    "token": "optional-token",
+    "capabilities": {"version": "1.0"}
+}
+```
+
+You can enable `Auto-send handshake on connect` in the Server configuration section. The handshake can also be sent manually by selecting the `Handshake` default command and clicking `Send`.
+
 ### HTTP
 
 ``` json
