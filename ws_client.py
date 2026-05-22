@@ -3,6 +3,7 @@ import threading
 from typing import Callable, Optional
 
 from websocket import WebSocketApp
+from utilities import validate_handshake, is_handshake_payload
 
 
 class WebSocketManager:
@@ -18,6 +19,14 @@ class WebSocketManager:
         self.ws_app = None
         self.ws_thread = None
         self.connected = False
+        # Handshake configuration
+        self.handshake_payload = None
+        self.auto_send_handshake = False
+
+    def set_handshake_config(self, payload: dict | None, auto_send: bool = False) -> None:
+        """Set handshake payload and whether to auto-send on open."""
+        self.handshake_payload = payload
+        self.auto_send_handshake = bool(auto_send)
 
     def connect(self, ws_url: str) -> None:
         if self.connected:
@@ -77,6 +86,17 @@ class WebSocketManager:
     def _on_open(self, _ws) -> None:
         self._set_connected(True)
         self.logger.log("WebSocket connected.")
+        # Auto-send handshake if configured
+        try:
+            if self.auto_send_handshake and self.handshake_payload is not None:
+                valid, msg = validate_handshake(self.handshake_payload)
+                if not valid:
+                    self.logger.log(f"Handshake validation failed: {msg}")
+                else:
+                    # send via existing path to ensure logging
+                    self.send_json(self.handshake_payload)
+        except Exception as exc:
+            self.logger.log(f"Handshake auto-send error: {exc}")
 
     def _on_message(self, _ws, message: str) -> None:
         if self.on_message:

@@ -5,7 +5,7 @@ from tkinter.scrolledtext import ScrolledText
 
 from ws_client import WebSocketManager
 from http_client import HttpClient
-from utilities import AppLogger, DEFAULT_COMMANDS
+from utilities import AppLogger, DEFAULT_COMMANDS, is_handshake_payload, validate_handshake
 
 
 class AppUI:
@@ -18,6 +18,11 @@ class AppUI:
         self.selected_option = tk.IntVar(value=0)
         self.ws_url_var = tk.StringVar(value="ws://localhost:8765/ws")
         self.http_url_var = tk.StringVar(value="http://localhost:8765")
+        self.client_id_var = tk.StringVar(value="client-123")
+        self.token_var = tk.StringVar(value="")
+        self.auto_handshake_var = tk.BooleanVar(value=False)
+
+        self.handshake_completed = False
 
         self.request_text = None
         self.log_text = None
@@ -85,6 +90,19 @@ class AppUI:
 
         ttk.Label(frame, text="HTTP Base URL:").grid(row=1, column=0, sticky="w", padx=8, pady=6)
         ttk.Entry(frame, textvariable=self.http_url_var).grid(row=1, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(frame, text="Client ID:").grid(row=2, column=0, sticky="w", padx=8, pady=6)
+        ttk.Entry(frame, textvariable=self.client_id_var).grid(row=2, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Label(frame, text="Token (optional):").grid(row=3, column=0, sticky="w", padx=8, pady=6)
+        ttk.Entry(frame, textvariable=self.token_var, show="*").grid(row=3, column=1, sticky="ew", padx=8, pady=6)
+
+        ttk.Checkbutton(
+            frame,
+            text="Auto-send handshake on connect",
+            variable=self.auto_handshake_var,
+            command=self._on_handshake_config_change,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=6)
 
     def _build_request_section(self) -> None:
         frame = ttk.LabelFrame(self.root, text="Command / Request")
@@ -159,11 +177,24 @@ class AppUI:
 
     def _handle_ws_message(self, message: str) -> None:
         self.logger.log(f"WebSocket received: {message}")
+        # Detect handshake response and update state
+        try:
+            data = json.loads(message)
+            # simplistic detection: action indicates handshake response or contains handshake key
+            action = data.get("action") if isinstance(data, dict) else None
+            if action in ("handshake_ack", "handshake_response") or "handshake" in data:
+                self.handshake_completed = True
+                self.logger.log("Handshake completed (response received).")
+        except Exception:
+            # not JSON or no handshake info
+            pass
 
     def _handle_ws_status_change(self, connected: bool) -> None:
         self.ws_connected = connected
 
     def connect(self) -> None:
+        # propagate handshake config before connecting
+        self._apply_handshake_config()
         self.ws_manager.connect(self.ws_url_var.get().strip())
 
     def disconnect(self) -> None:
@@ -173,7 +204,31 @@ class AppUI:
         payload = self._parse_request_json()
         if payload is None:
             return
-        self.ws_manager.send_json(payload)
+        # If this is a handshake payload, validate before sending
+        try:
+            if is_handshake_payload(payload):
+                valid, msg = validate_handshake(payload)
+                if not valid:
+                    self.logger.log(f"Handshake validation failed: {msg}")
+                    return
+            self.ws_manager.send_json(payload)
+        except Exception as exc:
+            self.logger.log(f"Error sending WebSocket message: {exc}")
+
+    def _on_handshake_config_change(self) -> None:
+        self._apply_handshake_config()
+
+    def _apply_handshake_config(self) -> None:
+        # Build handshake payload from UI fields and set on ws_manager
+        payload = {
+            "action": "handshake",
+            "clientId": self.client_id_var.get().strip(),
+        }
+        token = self.token_var.get().strip()
+        if token:
+            payload["token"] = token
+        payload["capabilities"] = {"version": "1.0"}
+        self.ws_manager.set_handshake_config(payload, auto_send=self.auto_handshake_var.get())
 
     def send_http(self) -> None:
         request_data = self._parse_request_json()
