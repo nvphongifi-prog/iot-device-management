@@ -1,10 +1,11 @@
-import json
-import types
+﻿import json
+from unittest.mock import Mock
 
 import pytest
 
+import ui
+import ws_client
 from utilities import validate_handshake, is_handshake_payload
-from ws_client import WebSocketManager
 
 
 class DummyLogger:
@@ -15,12 +16,69 @@ class DummyLogger:
         self.messages.append(msg)
 
 
-class DummyWSApp:
-    def __init__(self):
-        self.sent = []
+class DummyApp:
+    def __init__(self, raw_text: str | None = None):
+        self._raw_text = raw_text
+        self.logger = DummyLogger()
+        self.ws_manager = Mock()
+        self.handshake_completed = False
 
-    def send(self, raw):
-        self.sent.append(raw)
+    def _get_request_text(self):
+        return self._raw_text
+
+    def _parse_request_json(self):
+        raw_text = self._get_request_text()
+        if not raw_text:
+            self.logger.log("Request textbox is empty.")
+            return None
+        try:
+            return json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            self.logger.log(f"Invalid JSON: {exc}")
+            return None
+
+
+def test_parse_request_json_valid_and_invalid():
+    valid = DummyApp(raw_text=json.dumps({"action": "ping"}))
+    result = ui.AppUI._parse_request_json(valid)
+    assert result == {"action": "ping"}
+
+    invalid = DummyApp(raw_text="not-json")
+    result2 = ui.AppUI._parse_request_json(invalid)
+    assert result2 is None
+    assert any("Invalid JSON" in m for m in invalid.logger.messages)
+
+
+def test_send_websocket_manual_validation_calls_send_json_only_when_valid():
+    app = DummyApp()
+    app._raw_text = None
+    ui.AppUI.send_websocket(app)
+    assert not app.ws_manager.send_json.called
+
+    payload = {"action": "echo", "message": "hello"}
+    app._raw_text = json.dumps(payload)
+    ui.AppUI.send_websocket(app)
+    app.ws_manager.send_json.assert_called_with(payload)
+
+
+def test_ws_on_open_invalid_handshake_does_not_send():
+    logger = DummyLogger()
+    manager = ws_client.WebSocketManager(logger=logger)
+    manager.ws_app = Mock()
+    manager.handshake_payload = {"action": "handshake", "nonce": "abc123"}
+    manager.auto_send_handshake = True
+
+    sent = {}
+
+    def fake_send(payload):
+        sent["payload"] = payload
+
+    manager.send_json = fake_send
+    manager._on_open(None)
+
+    assert manager.connected is True
+    assert sent.get("payload") is None
+    assert any("Handshake validation failed" in m for m in logger.messages)
 
 
 def test_validate_handshake_success():
@@ -42,50 +100,39 @@ def test_is_handshake_payload():
     assert is_handshake_payload({"action": "ping"}) is False
 
 
+class DummyWSApp:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, raw):
+        self.sent.append(raw)
+
+
 def test_websocket_auto_send_handshake():
     logger = DummyLogger()
-    manager = WebSocketManager(logger=logger)
-    # set a dummy ws_app so send will work
+    manager = ws_client.WebSocketManager(logger=logger)
     manager.ws_app = DummyWSApp()
     payload = {"action": "handshake", "clientId": "auto-1"}
     manager.set_handshake_config(payload, auto_send=True)
-    # simulate open
     manager._on_open(None)
-    # check that message was sent
-    assert manager.ws_app.sent, "Expected handshake to be sent on open"
+    assert manager.ws_app.sent
     sent_obj = json.loads(manager.ws_app.sent[0])
     assert sent_obj["action"] == "handshake"
 
 
-def test_manual_send_validates_and_sends(monkeypatch):
+def test_manual_send_validates_and_sends():
     logger = DummyLogger()
-    manager = WebSocketManager(logger=logger)
+    manager = ws_client.WebSocketManager(logger=logger)
     manager.ws_app = DummyWSApp()
     manager.connected = True
 
-    # valid handshake
     payload = {"action": "handshake", "clientId": "manual-1"}
-    manager.send_json(payload)  # direct send_json should send
+    manager.send_json(payload)
     assert manager.ws_app.sent
 
 
-def test_response_handling_sets_flag(monkeypatch):
-    # Use a small App-like object to simulate on_message callback
-    logs = []
-
-    def append_log(msg):
-        logs.append(msg)
-
-    # create a simple handler that mimics UI._handle_ws_message
-    def handler(message: str):
-        append_log(f"received: {message}")
-        try:
-            data = json.loads(message)
-            action = data.get("action") if isinstance(data, dict) else None
-            if action in ("handshake_ack", "handshake_response") or "handshake" in data:
-                append_log("Handshake completed (response received).")
-        except Exception:
-            pass
-
-    handler(json.dumps({"action": "handshake_ack", "status": "ok"}))
-    assert any("Handshake completed" in m for m in logs)
+def test_handle_ws_message_sets_handshake_completed_flag():
+    app = DummyApp()
+    ui.AppUI._handle_ws_message(app, json.dumps({"action": "handshake_ack", "status": "ok"}))
+    assert app.handshake_completed is True
+    assert any("Handshake completed" in m for m in app.logger.messages)
